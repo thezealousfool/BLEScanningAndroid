@@ -1,6 +1,8 @@
 package com.vivekroy.blescanning
 
 import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
@@ -11,11 +13,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.os.Build
 import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
 import android.util.Log
 import android.view.View
 import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import kotlinx.android.synthetic.main.activity_main.*
 import java.nio.ByteBuffer
@@ -36,13 +40,19 @@ class MainActivity() : AppCompatActivity() {
         override fun onScanResult(callbackType: Int, result: ScanResult?) {
             val manufacturerData = result?.scanRecord?.getManufacturerSpecificData(76)
             val majorMinor = ByteBuffer.wrap(manufacturerData, 18, 4).asShortBuffer()
-            val major = majorMinor[0].toUShort()
-            val minor = majorMinor[1].toUShort()
-            Log.d("vvk:", "major: $major, minor: $minor, rssi: ${result?.rssi}, timestamp: ${result?.timestampNanos}")
+            val major = majorMinor[0].toUShort().toString()
+            val minor = majorMinor[1].toUShort().toString()
+            val logIntent = Intent(applicationContext, DBService::class.java)
+            logIntent.putExtra("major", major)
+            logIntent.putExtra("minor", minor)
+            logIntent.putExtra("rssi", result?.rssi)
+            logIntent.putExtra("timestamp", result?.timestampNanos)
+            logIntent.action = DBService.LOG_DATA
+            ContextCompat.startForegroundService(applicationContext, logIntent)
         }
     }
-    lateinit var scanSettings : ScanSettings
-    lateinit var scanFilter: ScanFilter
+    private lateinit var scanSettings : ScanSettings
+    private lateinit var scanFilter: ScanFilter
 
     fun getGuidFromByteArray(bytes: ByteArray): String {
         val buffer = StringBuilder()
@@ -93,16 +103,22 @@ class MainActivity() : AppCompatActivity() {
     private fun startScanning() {
         isScanning = true
         scanningButton.text = "Stop"
+        val startIntent = Intent(this, DBService::class.java)
+        startIntent.action = DBService.START_SERVICE
+        ContextCompat.startForegroundService(this, startIntent)
         bluetoothScanner.startScan(listOf(scanFilter), scanSettings, scanCallback)
     }
 
     private fun stopScanning() {
         bluetoothScanner.stopScan(scanCallback)
+        val stopIntent = Intent(this, DBService::class.java)
+        stopIntent.action = DBService.STOP_SERVICE
+        ContextCompat.startForegroundService(this, stopIntent)
         isScanning = false
         scanningButton.text = "Start"
     }
 
-    public fun onScanningClick(view: View) {
+    fun onScanningClick(view: View) {
         if (isScanning) {
             stopScanning()
         } else {
