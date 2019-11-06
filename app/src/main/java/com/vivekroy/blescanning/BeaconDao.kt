@@ -16,5 +16,5 @@ data class BeaconEntity (
 @Dao
 interface BeaconDao {
     @Insert
-    fun insertBeacons(vararg beacons: BeaconEntity)
+    suspend fun insertBeacons(vararg beacons: BeaconEntity)
 }

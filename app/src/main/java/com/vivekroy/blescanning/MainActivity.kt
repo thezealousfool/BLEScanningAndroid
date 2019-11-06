@@ -19,11 +19,21 @@ import android.os.Bundle
 import android.util.Log
 import android.view.View
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import androidx.room.Room
 import kotlinx.android.synthetic.main.activity_main.*
+import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ProducerScope
+import kotlinx.coroutines.channels.ReceiveChannel
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
 import java.util.*
 
 class MainActivity() : AppCompatActivity() {
@@ -32,36 +42,24 @@ class MainActivity() : AppCompatActivity() {
     private val bluetoothScanner = bluetoothAdapter.bluetoothLeScanner
     private val requestCode = 0
     private var isScanning = false
+    private var curTimestamp = 0L
+    private val queue = Channel<ScanResult>(Channel.UNLIMITED)
+    private lateinit var db : AppDatabase
     private val bluetoothReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             enableDisableButton()
         }
     }
-    private val scanCallback = object: ScanCallback() {
+    private val scanCallback = object: ScanCallback(), CoroutineScope by MainScope() {
         override fun onScanResult(callbackType: Int, result: ScanResult?) {
-            val manufacturerData = result?.scanRecord?.getManufacturerSpecificData(76)
-            val majorMinor = ByteBuffer.wrap(manufacturerData, 18, 4).asShortBuffer()
-            val major = majorMinor[0].toUShort().toString()
-            val minor = majorMinor[1].toUShort().toString()
-            val logIntent = Intent(applicationContext, DBService::class.java)
-            logIntent.putExtra("major", major)
-            logIntent.putExtra("minor", minor)
-            logIntent.putExtra("rssi", result?.rssi)
-            logIntent.putExtra("timestamp", result?.timestampNanos)
-            logIntent.action = DBService.LOG_DATA
-            ContextCompat.startForegroundService(applicationContext, logIntent)
+            if (result != null)
+                launch {
+                    queue.send(result)
+                }
         }
     }
     private lateinit var scanSettings : ScanSettings
     private lateinit var scanFilter: ScanFilter
-
-    fun getGuidFromByteArray(bytes: ByteArray): String {
-        val buffer = StringBuilder()
-        for (i in bytes.indices) {
-            buffer.append(String.format("%02x", bytes[i]))
-        }
-        return buffer.toString()
-    }
 
     private fun setScanFilter() {
         val uuid = UUID.fromString("F7826DA6-4FA2-4E98-8024-BC5B71E0893E")
@@ -101,20 +99,79 @@ class MainActivity() : AppCompatActivity() {
         setScanFilter()
     }
 
+    private fun initDb() {
+        db = Room.databaseBuilder(
+            applicationContext,
+            AppDatabase::class.java,
+            "com.vivekroy.navcoglogging").build()
+    }
+
+    private fun initConsumer() {
+        CoroutineScope(Dispatchers.Default).launch {
+            while(true) {
+                while(!queue.isEmpty) {
+                    val result = queue.receive()
+                    val manufacturerData = result?.scanRecord?.getManufacturerSpecificData(76)
+                    val majorMinor = ByteBuffer.wrap(manufacturerData, 18, 4).asShortBuffer()
+                    val major = majorMinor[0].toUShort().toString()
+                    val minor = majorMinor[1].toUShort().toString()
+                    db.beaconDao().insertBeacons(
+                        BeaconEntity(
+                            "F7826DA6-4FA2-4E98-8024-BC5B71E0893E",
+                            major,
+                            minor,
+                            result.rssi,
+                            result.timestampNanos
+                        ))
+                }
+                for (x in 1..10) {
+                    delay(300)
+                    if (!queue.isEmpty)
+                        break
+                }
+                if (queue.isEmpty)
+                    break
+            }
+            commitDatabase()
+        }
+    }
+
+    private fun commitDatabase() {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+
+                val dbFile = applicationContext.getDatabasePath("com.vivekroy.navcoglogging") as File
+                val backupFile = applicationContext.getDatabasePath("com.vivekroy.navcoglogging_" + System.nanoTime()) as File
+
+                if (dbFile.exists()) {
+                    val src = FileInputStream(dbFile).channel as FileChannel
+                    val dst = FileOutputStream(backupFile).channel as FileChannel
+                    dst.transferFrom(src, 0, src.size())
+                    src.close()
+                    dst.close()
+                    db.clearAllTables()
+                }
+
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(applicationContext, "Database saved", Toast.LENGTH_LONG).show()
+                }
+
+            } catch (e: Exception) {
+                Log.e("vvk:", e.message)
+            }
+        }
+    }
+
     private fun startScanning() {
         isScanning = true
         scanningButton.text = "Stop"
-        val startIntent = Intent(this, DBService::class.java)
-        startIntent.action = DBService.START_SERVICE
-        ContextCompat.startForegroundService(this, startIntent)
+        curTimestamp = System.nanoTime()
         bluetoothScanner.startScan(listOf(scanFilter), scanSettings, scanCallback)
+        initConsumer()
     }
 
     private fun stopScanning() {
-        bluetoothScanner.stopScan(scanCallback)
-        val stopIntent = Intent(this, DBService::class.java)
-        stopIntent.action = DBService.STOP_SERVICE
-        ContextCompat.startForegroundService(this, stopIntent)
+         bluetoothScanner.stopScan(scanCallback)
         isScanning = false
         scanningButton.text = "Start"
     }
@@ -133,6 +190,7 @@ class MainActivity() : AppCompatActivity() {
         ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.ACCESS_COARSE_LOCATION), requestCode)
         registerReceiver(bluetoothReceiver, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
         initScanSettings()
+        initDb()
     }
 
     override fun onResume() {
